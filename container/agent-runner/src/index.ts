@@ -63,6 +63,7 @@ interface SDKUserMessage {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+const MAX_TURNS = parseInt(process.env.MAX_TURNS || '500', 10);
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -498,6 +499,13 @@ async function runQuery(
         ? `system/${(message as { subtype?: string }).subtype}`
         : message.type;
     log(`[msg #${messageCount}] type=${msgType}`);
+
+    if (messageCount >= MAX_TURNS) {
+      log(`MAX_TURNS (${MAX_TURNS}) reached, ending query`);
+      stream.end();
+      ipcPolling = false;
+      break;
+    }
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;

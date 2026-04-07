@@ -314,12 +314,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
-    // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
+      // Agent sent output but then died (e.g. killed, timeout, loop).
+      // Recover cursor to last bot message in DB — this positions it
+      // right after the last response, so any piped-but-unprocessed
+      // messages get picked up by the next container.
+      const botTs = getLastBotMessageTimestamp(chatJid, ASSISTANT_NAME);
+      if (botTs) {
+        lastAgentTimestamp[chatJid] = botTs;
+        saveState();
+      }
       logger.warn(
         { group: group.name },
-        'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
+        'Agent error after output was sent, recovered cursor to last bot message',
       );
       return true;
     }
@@ -331,6 +338,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       'Agent error, rolled back message cursor for retry',
     );
     return false;
+  }
+
+  // On clean exit, sync cursor to the last bot message in DB.
+  // If messages were piped via IPC but the agent finished/idled
+  // before processing them, this recovers the cursor so the next
+  // container picks them up.
+  const finalBotTs = getLastBotMessageTimestamp(chatJid, ASSISTANT_NAME);
+  if (finalBotTs && finalBotTs !== lastAgentTimestamp[chatJid]) {
+    lastAgentTimestamp[chatJid] = finalBotTs;
+    saveState();
   }
 
   return true;

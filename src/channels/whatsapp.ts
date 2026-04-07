@@ -203,6 +203,24 @@ export class WhatsAppChannel implements Channel {
           }
         }
 
+        // Load LID→phone mappings from store (WhatsApp doesn't always
+        // share phone numbers for all contacts automatically)
+        const lidMapPath = path.join(STORE_DIR, 'lid-phone-map.json');
+        if (fs.existsSync(lidMapPath)) {
+          try {
+            const map = JSON.parse(fs.readFileSync(lidMapPath, 'utf-8'));
+            for (const [lid, phone] of Object.entries(map)) {
+              this.setLidPhoneMapping(lid, phone as string);
+            }
+            logger.info(
+              { count: Object.keys(map).length },
+              'Loaded LID→phone mappings from store',
+            );
+          } catch (err) {
+            logger.warn({ err }, 'Failed to load LID→phone mappings');
+          }
+        }
+
         // Flush any messages queued while disconnected
         this.flushOutgoingQueue().catch((err) =>
           logger.error({ err }, 'Failed to flush outgoing queue'),
@@ -267,6 +285,29 @@ export class WhatsAppChannel implements Channel {
               { lidJid: rawJid, phoneJid },
               'Translated LID via senderPn',
             );
+          }
+
+          // For group messages, learn the sender's LID→phone mapping
+          // from participant and participantPn fields (if available).
+          const participant = msg.key.participant;
+          if (
+            rawJid.endsWith('@g.us') &&
+            participant?.endsWith('@lid')
+          ) {
+            const participantPn = (msg as any).participantPn
+              || (msg.key as any).participantPn
+              || (msg as any).key?.participantPn;
+            if (participantPn) {
+              const pn = participantPn.includes('@')
+                ? participantPn
+                : `${participantPn}@s.whatsapp.net`;
+              const lidUser = participant.split('@')[0].split(':')[0];
+              this.setLidPhoneMapping(lidUser, pn);
+              logger.info(
+                { lidJid: participant, phoneJid: pn },
+                'Learned LID→phone from group message participantPn',
+              );
+            }
           }
 
           const timestamp = new Date(
@@ -391,7 +432,7 @@ export class WhatsAppChannel implements Channel {
   }
 
   ownsJid(jid: string): boolean {
-    return jid.endsWith('@g.us') || jid.endsWith('@s.whatsapp.net');
+    return jid.endsWith('@g.us') || jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid');
   }
 
   async disconnect(): Promise<void> {
@@ -489,6 +530,16 @@ export class WhatsAppChannel implements Channel {
     this.lidToPhoneMap[lidUser] = phoneJid;
     // Participant IDs in cached group metadata depend on this mapping.
     this.groupMetadataCache.clear();
+    // Persist: merge with existing file to preserve manually added mappings
+    try {
+      const lidMapPath = path.join(STORE_DIR, 'lid-phone-map.json');
+      let existing: Record<string, string> = {};
+      if (fs.existsSync(lidMapPath)) {
+        try { existing = JSON.parse(fs.readFileSync(lidMapPath, 'utf-8')); } catch {}
+      }
+      existing[lidUser] = phoneJid;
+      fs.writeFileSync(lidMapPath, JSON.stringify(existing, null, 2));
+    } catch {}
   }
 
   private async getNormalizedGroupMetadata(
@@ -516,7 +567,13 @@ export class WhatsAppChannel implements Channel {
     ).length;
 
     logger.info(
-      { jid, participantCount: participants.length, mappedCount },
+      {
+        jid,
+        participantCount: participants.length,
+        mappedCount,
+        original: metadata.participants.map((p) => p.id),
+        translated: participants.map((p) => p.id),
+      },
       'Prepared normalized group metadata for send',
     );
 

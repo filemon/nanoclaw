@@ -165,12 +165,17 @@ export class GroupQueue {
 
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
     try {
-      fs.mkdirSync(inputDir, { recursive: true });
+      fs.mkdirSync(inputDir, { recursive: true, mode: 0o777 });
+      try { fs.chmodSync(inputDir, 0o777); } catch {}
       const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
       const filepath = path.join(inputDir, filename);
       const tempPath = `${filepath}.tmp`;
-      fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
+      fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }), { mode: 0o666 });
       fs.renameSync(tempPath, filepath);
+      // Mark pending so drainGroup re-checks after container exit.
+      // If the container dies before processing the IPC message,
+      // this ensures a new container is spawned to handle it.
+      state.pendingMessages = true;
       return true;
     } catch {
       return false;
