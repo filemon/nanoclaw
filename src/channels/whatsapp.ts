@@ -290,13 +290,11 @@ export class WhatsAppChannel implements Channel {
           // For group messages, learn the sender's LID→phone mapping
           // from participant and participantPn fields (if available).
           const participant = msg.key.participant;
-          if (
-            rawJid.endsWith('@g.us') &&
-            participant?.endsWith('@lid')
-          ) {
-            const participantPn = (msg as any).participantPn
-              || (msg.key as any).participantPn
-              || (msg as any).key?.participantPn;
+          if (rawJid.endsWith('@g.us') && participant?.endsWith('@lid')) {
+            const participantPn =
+              (msg as any).participantPn ||
+              (msg.key as any).participantPn ||
+              (msg as any).key?.participantPn;
             if (participantPn) {
               const pn = participantPn.includes('@')
                 ? participantPn
@@ -326,7 +324,14 @@ export class WhatsAppChannel implements Channel {
 
           // Only deliver full message for registered groups
           const groups = this.opts.registeredGroups();
-          if (groups[chatJid]) {
+          // After LID→phone translation, the chatJid may be the phone form
+          // while the group is registered under the original LID form (or vice versa).
+          const matchedJid = groups[chatJid]
+            ? chatJid
+            : rawJid !== chatJid && groups[rawJid]
+              ? rawJid
+              : null;
+          if (matchedJid) {
             let content =
               normalized.conversation ||
               normalized.extendedTextMessage?.text ||
@@ -358,9 +363,9 @@ export class WhatsAppChannel implements Channel {
               ? fromMe
               : content.startsWith(`${ASSISTANT_NAME}:`);
 
-            this.opts.onMessage(chatJid, {
+            this.opts.onMessage(matchedJid, {
               id: msg.key.id || '',
-              chat_jid: chatJid,
+              chat_jid: matchedJid,
               sender,
               sender_name: senderName,
               content,
@@ -432,7 +437,11 @@ export class WhatsAppChannel implements Channel {
   }
 
   ownsJid(jid: string): boolean {
-    return jid.endsWith('@g.us') || jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid');
+    return (
+      jid.endsWith('@g.us') ||
+      jid.endsWith('@s.whatsapp.net') ||
+      jid.endsWith('@lid')
+    );
   }
 
   async disconnect(): Promise<void> {
@@ -535,7 +544,9 @@ export class WhatsAppChannel implements Channel {
       const lidMapPath = path.join(STORE_DIR, 'lid-phone-map.json');
       let existing: Record<string, string> = {};
       if (fs.existsSync(lidMapPath)) {
-        try { existing = JSON.parse(fs.readFileSync(lidMapPath, 'utf-8')); } catch {}
+        try {
+          existing = JSON.parse(fs.readFileSync(lidMapPath, 'utf-8'));
+        } catch {}
       }
       existing[lidUser] = phoneJid;
       fs.writeFileSync(lidMapPath, JSON.stringify(existing, null, 2));
