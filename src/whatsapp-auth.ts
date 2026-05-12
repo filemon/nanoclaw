@@ -80,13 +80,17 @@ async function connectSocket(
     process.exit(0);
   }
 
-  const { version } = await fetchLatestWaWebVersion({}).catch((err) => {
-    logger.warn(
-      { err },
-      'Failed to fetch latest WA Web version, using default',
-    );
-    return { version: undefined };
-  });
+  // WhatsApp rotates protocol versions server-side. fetchLatestWaWebVersion()
+  // often returns a stale version that gets rejected with 405. Use a known
+  // working version and only fall back to the fetched one if it's newer.
+  const WA_VERSION: [number, number, number] = [2, 3000, 1037641644];
+  const { version: fetchedVersion } = await fetchLatestWaWebVersion({}).catch(
+    () => ({ version: undefined as [number, number, number] | undefined }),
+  );
+  const version =
+    fetchedVersion && fetchedVersion[2] > WA_VERSION[2]
+      ? fetchedVersion
+      : WA_VERSION;
   const sock = makeWASocket({
     version,
     auth: {
