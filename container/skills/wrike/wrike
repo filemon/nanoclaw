@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# wrike — thin CLI wrapper for the Wrike v4 API
+# Auth injected by OneCLI gateway (host-pattern: www.wrike.com)
+set -euo pipefail
+
+BASE="https://www.wrike.com/api/v4"
+
+pretty() { node -e "process.stdin.resume();let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.stringify(JSON.parse(d),null,2))}catch{console.log(d)}})"; }
+
+if [ $# -lt 2 ]; then
+  cat <<'USAGE'
+Usage: wrike <METHOD> <path> [curl-args...]
+
+Examples:
+  wrike GET "/contacts?me=true"
+  wrike GET /spaces
+  wrike GET "/tasks?spaces=[IEAGCXXXXX]&status=Active"
+  wrike GET /tasks/IEAGCXXXXXKQYABC
+  wrike POST /folders/IEAGCXXXXX/tasks -d '{"title":"Review PR"}'
+  wrike PUT /tasks/IEAGCXXXXXKQYABC -d '{"status":"Completed"}'
+  wrike DELETE /tasks/IEAGCXXXXXKQYABC
+
+Auth is handled by OneCLI gateway — no token needed.
+USAGE
+  exit 0
+fi
+
+method="$1" path="$2"
+shift 2
+
+curl -sf -X "$method" \
+  -H "Content-Type: application/json" \
+  "$@" \
+  "${BASE}${path}" | pretty
