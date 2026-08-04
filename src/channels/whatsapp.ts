@@ -38,10 +38,10 @@ import {
 } from '@whiskeysockets/baileys';
 import type { GroupMetadata, WAMessageKey, WAMessage, WASocket } from '@whiskeysockets/baileys';
 
-import { isSafeAttachmentName } from '../attachment-safety.js';
-import { ASSISTANT_HAS_OWN_NUMBER, ASSISTANT_NAME, DATA_DIR } from '../config.js';
+import { ASSISTANT_HAS_OWN_NUMBER, ASSISTANT_NAME } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+import { loadTranscriptionConfig, transcribeAudio, type TranscriptionConfig } from '../transcription.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelSetup, ConversationInfo, InboundMessage, OutboundMessage } from './adapter.js';
@@ -272,6 +272,14 @@ registerChannelAdapter('whatsapp', {
     const phoneNumber = env.WHATSAPP_PHONE_NUMBER;
     const authDir = AUTH_DIR;
 
+    // Voice-note transcription (OpenAI audio API). null when no OPENAI_API_KEY
+    // or VOICE_TRANSCRIPTION_ENABLED=false — audio then passes through as a
+    // plain attachment, as before.
+    const transcription = loadTranscriptionConfig();
+    if (transcription) {
+      log.info('WhatsApp voice transcription enabled', { model: transcription.model });
+    }
+
     // Skip if no existing auth, no phone number for pairing, and not explicitly enabled (QR mode)
     const hasAuth = fs.existsSync(path.join(authDir, 'creds.json'));
     if (!hasAuth && !phoneNumber && !env.WHATSAPP_ENABLED) return null;
@@ -423,46 +431,97 @@ registerChannelAdapter('whatsapp', {
       }
     }
 
-    /** Download media from an inbound message, save to /workspace/attachments/. */
+    /**
+     * Download media from an inbound message and return it as base64 `data`.
+     *
+     * We deliberately do NOT write files to disk here. The host stages inbound
+     * attachments into the session's `/workspace/inbox/<msgId>/` directory in
+     * `extractAttachmentFiles` (src/session-manager.ts), which is the only
+     * `attachments`-bearing path the container can actually read — it's the
+     * session dir that gets bind-mounted at `/workspace`. The previous version
+     * wrote to `DATA_DIR/attachments/` (never mounted into any container) and
+     * set `localPath` itself, so the file was silently invisible to the agent.
+     *
+     * Matching the chat-sdk-bridge contract (`{ type, name, mimeType, size,
+     * data }`) means `extractAttachmentFiles` handles filename safety,
+     * extension derivation, and localPath rewriting uniformly. `fileName` is
+     * passed through raw (attacker-controlled over WhatsApp's E2E channel); the
+     * `isSafeAttachmentName` guard on the host side rejects/replaces it.
+     */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async function downloadInboundMedia(
       msg: WAMessage,
       normalized: any,
-    ): Promise<Array<{ type: string; name: string; localPath: string }>> {
-      const mediaTypes: Array<{ key: string; type: string; ext: string }> = [
-        { key: 'imageMessage', type: 'image', ext: '.jpg' },
-        { key: 'videoMessage', type: 'video', ext: '.mp4' },
-        { key: 'audioMessage', type: 'audio', ext: '.ogg' },
-        { key: 'documentMessage', type: 'document', ext: '' },
+    ): Promise<Array<{ type: string; name?: string; mimeType?: string; size?: number; data: string }>> {
+      const mediaTypes: Array<{ key: string; type: string }> = [
+        { key: 'imageMessage', type: 'image' },
+        { key: 'videoMessage', type: 'video' },
+        { key: 'audioMessage', type: 'audio' },
+        { key: 'documentMessage', type: 'document' },
       ];
-      const results: Array<{ type: string; name: string; localPath: string }> = [];
-      for (const { key, type, ext } of mediaTypes) {
-        if (!normalized[key]) continue;
+      const results: Array<{ type: string; name?: string; mimeType?: string; size?: number; data: string }> = [];
+      for (const { key, type } of mediaTypes) {
+        const node = normalized[key];
+        if (!node) continue;
         try {
           const buffer = await downloadMediaMessage(msg, 'buffer', {});
-          // documentMessage.fileName is attacker-controlled and rides through
-          // WhatsApp's E2E channel — Meta can't sanitize it server-side. Without
-          // this guard, a `..`-laden fileName escapes attachDir on path.join.
-          const rawFilename = normalized[key].fileName;
-          const fallback = `${type}-${Date.now()}${ext}`;
-          const filename = isSafeAttachmentName(rawFilename) ? rawFilename : fallback;
-          if (rawFilename && filename !== rawFilename) {
-            log.warn('Refused unsafe attachment filename — would escape attachments dir', {
-              rawFilename,
-              replacement: filename,
-            });
-          }
-          const attachDir = path.join(DATA_DIR, 'attachments');
-          fs.mkdirSync(attachDir, { recursive: true });
-          const filePath = path.join(attachDir, filename);
-          fs.writeFileSync(filePath, buffer);
-          results.push({ type, name: filename, localPath: `attachments/${filename}` });
-          log.info('Media downloaded', { type, filename });
+          const rawFilename = typeof node.fileName === 'string' ? node.fileName : undefined;
+          const mimeType = typeof node.mimetype === 'string' ? node.mimetype : undefined;
+          // fileLength may arrive as a Long-like object; coerce defensively.
+          const size = node.fileLength != null ? Number(node.fileLength) : undefined;
+          results.push({
+            type,
+            ...(rawFilename && { name: rawFilename }),
+            ...(mimeType && { mimeType }),
+            ...(Number.isFinite(size) && { size }),
+            data: buffer.toString('base64'),
+          });
+          log.info('Media downloaded', { type, mimeType });
         } catch (err) {
           log.warn('Failed to download media', { type, err });
         }
       }
       return results;
+    }
+
+    /**
+     * Transcribe any audio attachments and fold the transcripts into the
+     * message text, so a voice note reaches the agent as plain text (the Agent
+     * SDK can't read audio). Transcribed audio is dropped from `attachments` so
+     * no unreadable .ogg is staged into the container inbox; non-audio
+     * attachments pass through untouched. On failure the audio is kept as an
+     * attachment and a short marker is added to the text so the message is
+     * never silently lost.
+     */
+    async function applyVoiceTranscription(
+      cfg: TranscriptionConfig,
+      caption: string,
+      attachments: Array<{ type: string; name?: string; mimeType?: string; size?: number; data: string }>,
+    ): Promise<{
+      content: string;
+      attachments: Array<{ type: string; name?: string; mimeType?: string; size?: number; data: string }>;
+    }> {
+      const audio = attachments.filter((a) => a.type === 'audio');
+      if (audio.length === 0) return { content: caption, attachments };
+
+      const kept = attachments.filter((a) => a.type !== 'audio');
+      const transcripts: string[] = [];
+      for (const att of audio) {
+        const text = await transcribeAudio(Buffer.from(att.data, 'base64'), cfg, {
+          mimeType: att.mimeType,
+          filename: att.name,
+        });
+        if (text) {
+          transcripts.push(text);
+        } else {
+          // Transcription failed — keep the raw audio for the agent to handle.
+          kept.push(att);
+          transcripts.push('[voice message — transcription unavailable]');
+        }
+      }
+
+      const parts = [caption.trim(), ...transcripts].filter(Boolean);
+      return { content: parts.join('\n\n'), attachments: kept };
     }
 
     async function sendRawMessage(jid: string, text: string, mentions?: string[]): Promise<string | undefined> {
@@ -699,10 +758,18 @@ registerChannelAdapter('whatsapp', {
             }
 
             // Download media attachments (images, video, audio, documents)
-            const attachments = await downloadInboundMedia(msg, normalized);
+            let attachments = await downloadInboundMedia(msg, normalized);
 
             // Skip empty protocol messages (no text and no attachments)
             if (!content && attachments.length === 0) continue;
+
+            // Transcribe voice notes into the message text so they reach the
+            // agent (and trigger/mention matching) as plain text.
+            if (transcription && attachments.some((a) => a.type === 'audio')) {
+              const r = await applyVoiceTranscription(transcription, content, attachments);
+              content = r.content;
+              attachments = r.attachments;
+            }
 
             // Resolve sender: in groups, participant may be LID — use participantAlt
             const rawSender = msg.key.participant || msg.key.remoteJid || '';

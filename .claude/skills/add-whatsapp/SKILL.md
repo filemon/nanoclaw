@@ -204,6 +204,22 @@ If dedicated, add to `.env`:
 ASSISTANT_HAS_OWN_NUMBER=true
 ```
 
+### Voice-note transcription (optional)
+
+Voice notes are OGG/Opus audio, which the agent SDK can't read. If `OPENAI_API_KEY`
+is set in `.env`, the adapter transcribes inbound voice notes on the host (OpenAI
+audio API — OGG accepted directly, no ffmpeg) and folds the transcript into the
+message text, so a voice note behaves like a typed message for triggers, routing,
+and the agent. Transcribed audio is not staged into the container inbox. On any
+transcription failure the raw audio is kept and a `[voice message — transcription
+unavailable]` marker is added, so messages are never silently dropped.
+
+```bash
+# Optional overrides (defaults shown):
+# VOICE_TRANSCRIPTION_MODEL=whisper-1     # e.g. gpt-4o-transcribe
+# VOICE_TRANSCRIPTION_ENABLED=true        # set false to disable even with a key
+```
+
 ## Next Steps
 
 If you're in the middle of `/setup`, return to the setup flow now.
@@ -224,6 +240,7 @@ Otherwise, run `/manage-channels` to wire this channel to an agent group.
 - Markdown formatting — `**bold**`→`*bold*`, `*italic*`→`_italic_`, headings→bold, code blocks preserved
 - Approval questions — `ask_user_question` renders with `/approve`, `/reject` slash commands
 - File attachments — send and receive images, video, audio, documents
+- Voice transcription — inbound voice notes auto-transcribed to text when `OPENAI_API_KEY` is set (see Voice-note transcription above)
 - Reactions — send emoji reactions on messages
 - Typing indicators — composing presence updates
 - Credential requests — text fallback (WhatsApp has no modal support)

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# monksheets — thin CLI wrapper for MonkSheets API
+# Auth injected by OneCLI gateway (host-pattern: monksheets.topmonks.com)
+set -euo pipefail
+
+BASE="https://monksheets.topmonks.com"
+
+pretty() { node -e "process.stdin.resume();let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.stringify(JSON.parse(d),null,2))}catch{console.log(d)}})"; }
+
+if [ $# -lt 2 ]; then
+  cat <<'USAGE'
+Usage: monksheets <METHOD> <path> [curl-args...]
+
+Examples:
+  monksheets GET /api/auth/me
+  monksheets GET "/api/time/entries/daily?date=2026-04-07"
+  monksheets POST /api/time/entries -d '{"projectId":"abc","date":"2026-04-07","hours":4,"description":"work"}'
+  monksheets PATCH /api/time/entries/123 -d '{"hours":5}'
+  monksheets DELETE /api/time/entries/123
+
+Auth is handled by OneCLI gateway — no token needed.
+USAGE
+  exit 0
+fi
+
+method="$1" path="$2"
+shift 2
+
+curl -sf -X "$method" \
+  -H "Content-Type: application/json" \
+  "$@" \
+  "${BASE}${path}" | pretty
