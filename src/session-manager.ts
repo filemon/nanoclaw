@@ -157,6 +157,11 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
 
   ensureSchema(inboundDbPath(agentGroupId, sessionId), 'inbound');
   ensureSchema(outboundDbPath(agentGroupId, sessionId), 'outbound');
+  // SQLite creates files 0644 regardless of umask, which also narrows the
+  // POSIX ACL mask to r-- and leaves the container user (uid 1000) unable to
+  // write. Make both DBs group-writable so the ACL grant takes effect.
+  fs.chmodSync(inboundDbPath(agentGroupId, sessionId), 0o664);
+  fs.chmodSync(outboundDbPath(agentGroupId, sessionId), 0o664);
 }
 
 /**
