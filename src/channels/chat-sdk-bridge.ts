@@ -19,6 +19,7 @@ import {
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
+import { loadTranscriptionConfig, transcribeAudio, type TranscriptionConfig } from '../transcription.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { getAskQuestionRender } from '../db/sessions.js';
@@ -179,6 +180,49 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   let state: SqliteStateAdapter;
   let setupConfig: ChannelSetup;
   let gatewayAbort: AbortController | null = null;
+  // Voice-note transcription config, resolved on first audio attachment.
+  // null = disabled / no OPENAI_API_KEY.
+  let transcription: TranscriptionConfig | null | undefined;
+
+  /**
+   * Transcribe audio attachments and fold the transcripts into the message
+   * text, so a voice note reaches the agent (and trigger/mention matching) as
+   * plain text — the Agent SDK can't read audio. Transcribed audio is dropped
+   * from the attachments so no unreadable .ogg is staged into the inbox. On
+   * failure the audio is kept and a short marker is added to the text so the
+   * message is never silently lost. Mirrors the WhatsApp adapter's handling.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function applyVoiceTranscription(serialized: Record<string, any>, attachments: Record<string, any>[]) {
+    if (!attachments.some((a) => a.type === 'audio' && a.data)) return attachments;
+    if (transcription === undefined) {
+      transcription = loadTranscriptionConfig();
+      if (transcription) log.info('Chat SDK voice transcription enabled', { model: transcription.model });
+    }
+    if (!transcription) return attachments;
+
+    const kept = [];
+    const transcripts: string[] = [];
+    for (const att of attachments) {
+      if (att.type !== 'audio' || !att.data) {
+        kept.push(att);
+        continue;
+      }
+      const text = await transcribeAudio(Buffer.from(att.data, 'base64'), transcription, {
+        mimeType: att.mimeType,
+        filename: att.name,
+      });
+      if (text) {
+        transcripts.push(text);
+      } else {
+        kept.push(att);
+        transcripts.push('[voice message — transcription unavailable]');
+      }
+    }
+    const caption = typeof serialized.text === 'string' ? serialized.text.trim() : '';
+    serialized.text = [caption, ...transcripts].filter(Boolean).join('\n\n');
+    return kept;
+  }
 
   async function messageToInbound(
     message: ChatMessage,
@@ -211,7 +255,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }
         enriched.push(entry);
       }
-      serialized.attachments = enriched;
+      serialized.attachments = await applyVoiceTranscription(serialized, enriched);
     }
 
     // Extract reply context via platform-specific hook
