@@ -53,10 +53,14 @@ async function withRetry<T>(fn: () => Promise<T>, label: string, maxAttempts = 5
 function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
   if (!raw.reply_to_message) return null;
   const reply = raw.reply_to_message;
-  return {
+  // senderId survives into content.replyTo (the bridge drops `raw` before
+  // onInbound) so markRepliesToBotAsMentions can spot replies to the bot.
+  const context: ReplyContext & { senderId?: string } = {
     text: reply.text || reply.caption || '',
     sender: reply.from?.first_name || reply.from?.username || 'Unknown',
+    senderId: reply.from?.id !== undefined ? String(reply.from.id) : undefined,
   };
+  return context;
 }
 
 /** Look up the bot username via Telegram getMe. Cached after first call. */
@@ -210,6 +214,25 @@ function createPairingInterceptor(
 }
 
 /**
+ * A reply to one of this bot's own messages addresses the bot just like an
+ * @mention, so flag it as one. Without this, a plain "ano" sent as a reply to
+ * the bot's question is dropped by mention/pattern wirings in groups. The bot
+ * id is the numeric prefix of its token.
+ */
+function markRepliesToBotAsMentions(token: string, onInbound: ChannelSetup['onInbound']): ChannelSetup['onInbound'] {
+  const botId = token.split(':')[0];
+  return (platformId, threadId, message) => {
+    if (!message.isMention && message.kind === 'chat-sdk' && message.content && typeof message.content === 'object') {
+      const replyFromId = (message.content as { replyTo?: { senderId?: string } }).replyTo?.senderId;
+      if (replyFromId !== undefined && replyFromId === botId) {
+        message = { ...message, isMention: true };
+      }
+    }
+    return onInbound(platformId, threadId, message);
+  };
+}
+
+/**
  * Build one Telegram bot adapter. `instance` undefined = the default
  * instance (registry key 'telegram'); a named instance runs a second bot
  * identity side by side (own token, own state namespace, own messaging
@@ -252,9 +275,10 @@ function buildTelegramAdapter(token: string, instance?: string): ChannelAdapter 
       }
     },
     async setup(hostConfig: ChannelSetup) {
+      const onInbound = markRepliesToBotAsMentions(token, hostConfig.onInbound);
       const intercepted: ChannelSetup = botUsernamePromise
-        ? { ...hostConfig, onInbound: createPairingInterceptor(botUsernamePromise, hostConfig.onInbound, token) }
-        : hostConfig;
+        ? { ...hostConfig, onInbound: createPairingInterceptor(botUsernamePromise, onInbound, token) }
+        : { ...hostConfig, onInbound };
       return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
     },
   };

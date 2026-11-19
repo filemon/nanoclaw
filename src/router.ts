@@ -424,6 +424,9 @@ function evaluateEngage(
     case 'pattern': {
       const pat = agent.engage_pattern ?? '.';
       if (pat === '.') return true;
+      // A platform-confirmed mention (@bot, or a reply to the bot) always
+      // addresses the agent, even when the text doesn't match the pattern.
+      if (isMention) return true;
       try {
         return new RegExp(pat).test(text);
       } catch {
