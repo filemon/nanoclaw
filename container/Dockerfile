@@ -106,6 +106,11 @@ COPY cli-tools.json install-cli-tools.sh /tmp/
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     sh /tmp/install-cli-tools.sh /tmp/cli-tools.json
 
+# Google Calendar MCP server (/add-gcal-tool). OneCLI injects real OAuth tokens.
+ARG CALENDAR_MCP_VERSION=2.6.1
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    pnpm install -g "@cocal/google-calendar-mcp@${CALENDAR_MCP_VERSION}"
+
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
