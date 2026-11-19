@@ -209,53 +209,72 @@ function createPairingInterceptor(
   };
 }
 
+/**
+ * Build one Telegram bot adapter. `instance` undefined = the default
+ * instance (registry key 'telegram'); a named instance runs a second bot
+ * identity side by side (own token, own state namespace, own messaging
+ * groups keyed by instance). Pairing codes are only consumed by the default
+ * instance — named instances register chats via the router's auto-create.
+ */
+function buildTelegramAdapter(token: string, instance?: string): ChannelAdapter {
+  const telegramAdapter = createTelegramAdapter({
+    botToken: token,
+    mode: 'polling',
+  });
+  const bridge = createChatSdkBridge({
+    adapter: telegramAdapter,
+    instance,
+    concurrency: 'concurrent',
+    extractReplyContext,
+    supportsThreads: false,
+    defaults: TELEGRAM_DEFAULTS,
+    transformOutboundText: sanitizeTelegramLegacyMarkdown,
+    maxTextLength: 4000,
+  });
+
+  const botUsernamePromise = instance ? null : fetchBotUsername(token);
+
+  return {
+    ...bridge,
+    resolveChannelName: async (platformId: string) => {
+      const chatId = platformId.split(':').slice(1).join(':');
+      if (!chatId) return null;
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId }),
+        });
+        const data = (await res.json()) as { ok?: boolean; result?: { title?: string } };
+        return data.ok ? (data.result?.title ?? null) : null;
+      } catch {
+        return null;
+      }
+    },
+    async setup(hostConfig: ChannelSetup) {
+      const intercepted: ChannelSetup = botUsernamePromise
+        ? { ...hostConfig, onInbound: createPairingInterceptor(botUsernamePromise, hostConfig.onInbound, token) }
+        : hostConfig;
+      return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
+    },
+  };
+}
+
 registerChannelAdapter('telegram', {
   factory: () => {
     const env = readEnvFile(['TELEGRAM_BOT_TOKEN']);
     if (!env.TELEGRAM_BOT_TOKEN) return null;
-    const token = env.TELEGRAM_BOT_TOKEN;
-    const telegramAdapter = createTelegramAdapter({
-      botToken: token,
-      mode: 'polling',
-    });
-    const bridge = createChatSdkBridge({
-      adapter: telegramAdapter,
-      concurrency: 'concurrent',
-      extractReplyContext,
-      supportsThreads: false,
-      defaults: TELEGRAM_DEFAULTS,
-      transformOutboundText: sanitizeTelegramLegacyMarkdown,
-      maxTextLength: 4000,
-    });
+    return buildTelegramAdapter(env.TELEGRAM_BOT_TOKEN);
+  },
+  defaults: TELEGRAM_DEFAULTS,
+});
 
-    const botUsernamePromise = fetchBotUsername(token);
-
-    const wrapped: ChannelAdapter = {
-      ...bridge,
-      resolveChannelName: async (platformId: string) => {
-        const chatId = platformId.split(':').slice(1).join(':');
-        if (!chatId) return null;
-        try {
-          const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId }),
-          });
-          const data = (await res.json()) as { ok?: boolean; result?: { title?: string } };
-          return data.ok ? (data.result?.title ?? null) : null;
-        } catch {
-          return null;
-        }
-      },
-      async setup(hostConfig: ChannelSetup) {
-        const intercepted: ChannelSetup = {
-          ...hostConfig,
-          onInbound: createPairingInterceptor(botUsernamePromise, hostConfig.onInbound, token),
-        };
-        return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
-      },
-    };
-    return wrapped;
+// Second bot identity for the family agent group.
+registerChannelAdapter('telegram-family', {
+  factory: () => {
+    const env = readEnvFile(['TELEGRAM_FAMILY_BOT_TOKEN']);
+    if (!env.TELEGRAM_FAMILY_BOT_TOKEN) return null;
+    return buildTelegramAdapter(env.TELEGRAM_FAMILY_BOT_TOKEN, 'telegram-family');
   },
   defaults: TELEGRAM_DEFAULTS,
 });
